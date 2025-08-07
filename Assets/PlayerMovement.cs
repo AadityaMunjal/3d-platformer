@@ -1,5 +1,4 @@
 using UnityEngine;
-using UnityEngine.InputSystem;
 
 public class PlayerMovement : MonoBehaviour
 {
@@ -13,10 +12,27 @@ public class PlayerMovement : MonoBehaviour
     [SerializeField] private float jumpForce = 12f;
     [SerializeField] private float jumpCooldown = 0.25f;
     [SerializeField] private float airDrag = 2f;
+    [SerializeField] private bool allowDoubleJump = true;
+    [SerializeField] private float doubleJumpForce = 10f;
     
     [Header("Crouching")]
     [SerializeField] private float crouchSpeed = 3f;
     [SerializeField] private float crouchYScale = 0.5f;
+    
+    [Header("Wall Running")]
+    [SerializeField] private float wallRunSpeed = 8f;
+    [SerializeField] private float wallRunForce = 200f;
+    [SerializeField] private float wallJumpUpForce = 7f;
+    [SerializeField] private float wallJumpSideForce = 12f;
+    [SerializeField] private float wallRunGravity = 1f;
+    [SerializeField] private float wallCheckDistance = 0.7f;
+    [SerializeField] private float minJumpHeight = 1.5f;
+    [SerializeField] private LayerMask wallMask = -1;
+    
+    [Header("Ledge Climbing")]
+    [SerializeField] private float ledgeCheckDistance = 1f;
+    [SerializeField] private float ledgeGrabSpeed = 8f;
+    [SerializeField] private float climbSpeed = 5f;
     
     [Header("Ground Check")]
     [SerializeField] private float playerHeight = 2f;
@@ -41,6 +57,15 @@ public class PlayerMovement : MonoBehaviour
     private bool readyToJump = true;
     private float startYScale;
     
+    // Parkour variables
+    private bool hasDoubleJumped = false;
+    private bool wallLeft, wallRight;
+    private bool wallRunning;
+    private bool isClimbing;
+    private bool onLedge;
+    private RaycastHit leftWallHit, rightWallHit;
+    private RaycastHit ledgeHit;
+    
     // Slope handling
     private RaycastHit slopeHit;
     private bool exitingSlope;
@@ -53,7 +78,9 @@ public class PlayerMovement : MonoBehaviour
         Walking,
         Sprinting,
         Crouching,
-        Air
+        Air,
+        WallRunning,
+        Climbing
     }
     
     public MovementState state;
@@ -70,54 +97,65 @@ public class PlayerMovement : MonoBehaviour
     {
         grounded = Physics.Raycast(transform.position, Vector3.down, playerHeight * 0.5f + 0.3f, groundMask);
         
+        // legacy input
+        HandleDirectInput();
+        
+        CheckForWalls();
+        CheckForLedge();
+        
         HandleDrag();
         
         StateHandler();
+        
+        if (wallRunning)
+            WallRunningMovement();
+        
         SpeedControl();
+        
+        // Reset double jump when grounded
+        if (grounded && rb.linearVelocity.y <= 0)
+            hasDoubleJumped = false;
     }
     
     private void FixedUpdate()
     {
         MovePlayer();
+        ClimbingMovement();
     }
     
-    #region Input System Callbacks
-    
-    public void OnMove(InputAction.CallbackContext context)
+    private void HandleDirectInput()
     {
-        moveInput = context.ReadValue<Vector2>();
-    }
-    
-    public void OnJump(InputAction.CallbackContext context)
-    {
-        if (context.performed)
+        // keyboard input
+        float horizontal = 0f;
+        float vertical = 0f;
+        
+        if (Input.GetKey(KeyCode.W) || Input.GetKey(KeyCode.UpArrow))
+            vertical = 1f;
+        if (Input.GetKey(KeyCode.S) || Input.GetKey(KeyCode.DownArrow))
+            vertical = -1f;
+        if (Input.GetKey(KeyCode.A) || Input.GetKey(KeyCode.LeftArrow))
+            horizontal = -1f;
+        if (Input.GetKey(KeyCode.D) || Input.GetKey(KeyCode.RightArrow))
+            horizontal = 1f;
+        
+        moveInput = new Vector2(horizontal, vertical);
+        
+        // jumping
+        if (Input.GetKeyDown(KeyCode.Space))
         {
             isJumping = true;
             Jump();
         }
-        
-        if (context.canceled)
+        if (Input.GetKeyUp(KeyCode.Space))
         {
             isJumping = false;
         }
-    }
-    
-    public void OnSprint(InputAction.CallbackContext context)
-    {
-        if (context.performed)
-        {
-            isSprinting = true;
-        }
         
-        if (context.canceled)
-        {
-            isSprinting = false;
-        }
-    }
-    
-    public void OnCrouch(InputAction.CallbackContext context)
-    {
-        if (context.performed)
+        // sprinting
+        isSprinting = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
+        
+        // crouching
+        if (Input.GetKeyDown(KeyCode.C))
         {
             isCrouching = !isCrouching;
             
@@ -133,41 +171,56 @@ public class PlayerMovement : MonoBehaviour
         }
     }
     
-    #endregion
-    
     private void StateHandler()
     {
-        // Mode - Crouching
-        if (isCrouching)
+        // wall running
+        if ((wallLeft || wallRight) && !grounded && rb.linearVelocity.y < 2f)
+        {
+            state = MovementState.WallRunning;
+            wallRunning = true;
+            moveSpeed = wallRunSpeed;
+        }
+        // climbing
+        else if (isClimbing)
+        {
+            state = MovementState.Climbing;
+            moveSpeed = climbSpeed;
+        }
+        // crouching
+        else if (isCrouching)
         {
             state = MovementState.Crouching;
             moveSpeed = crouchSpeed;
+            wallRunning = false;
         }
-        // Mode - Sprinting
+        // sprinting
         else if (grounded && isSprinting)
         {
             state = MovementState.Sprinting;
             moveSpeed = sprintSpeed;
+            wallRunning = false;
         }
-        // Mode - Walking
+        // walking
         else if (grounded)
         {
             state = MovementState.Walking;
             moveSpeed = walkSpeed;
+            wallRunning = false;
         }
-        // Mode - Air
+        // air
         else
         {
             state = MovementState.Air;
+            wallRunning = false;
         }
     }
     
     private void MovePlayer()
     {
-        // Calculate movement direction
+        // movement direction
         moveDirection = orientation.forward * moveInput.y + orientation.right * moveInput.x;
         
-        // On slope
+        // on slope
         if (OnSlope() && !exitingSlope)
         {
             rb.AddForce(GetSlopeMoveDirection() * moveSpeed * 20f, ForceMode.Force);
@@ -175,35 +228,32 @@ public class PlayerMovement : MonoBehaviour
             if (rb.linearVelocity.y > 0)
                 rb.AddForce(Vector3.down * 80f, ForceMode.Force);
         }
-        // On ground
+        // on ground
         else if (grounded)
         {
             rb.AddForce(moveDirection.normalized * moveSpeed * 10f, ForceMode.Force);
         }
-        // In air
+        // in air
         else if (!grounded)
         {
             rb.AddForce(moveDirection.normalized * moveSpeed * 10f * airMultiplier, ForceMode.Force);
         }
         
-        // Turn gravity off while on slope
-        rb.useGravity = !OnSlope();
+        // gravity off while on slope or wall running
+        rb.useGravity = !OnSlope() && !wallRunning;
     }
     
     private void SpeedControl()
     {
-        // Limiting speed on slope
         if (OnSlope() && !exitingSlope)
         {
             if (rb.linearVelocity.magnitude > moveSpeed)
                 rb.linearVelocity = rb.linearVelocity.normalized * moveSpeed;
         }
-        // Limiting speed on ground or in air
         else
         {
             Vector3 flatVel = new Vector3(rb.linearVelocity.x, 0f, rb.linearVelocity.z);
             
-            // Limit velocity if needed
             if (flatVel.magnitude > moveSpeed)
             {
                 Vector3 limitedVel = flatVel.normalized * moveSpeed;
@@ -219,10 +269,24 @@ public class PlayerMovement : MonoBehaviour
             readyToJump = false;
             exitingSlope = true;
             
-            // Reset y velocity
             rb.linearVelocity = new Vector3(rb.linearVelocity.x, 0f, rb.linearVelocity.z);
             
             rb.AddForce(transform.up * jumpForce, ForceMode.Impulse);
+            
+            Invoke(nameof(ResetJump), jumpCooldown);
+        }
+        else if (wallRunning)
+        {
+            WallJump();
+        }
+        else if (!grounded && allowDoubleJump && !hasDoubleJumped && readyToJump)
+        {
+            hasDoubleJumped = true;
+            readyToJump = false;
+            
+            rb.linearVelocity = new Vector3(rb.linearVelocity.x, 0f, rb.linearVelocity.z);
+            
+            rb.AddForce(transform.up * doubleJumpForce, ForceMode.Impulse);
             
             Invoke(nameof(ResetJump), jumpCooldown);
         }
@@ -256,5 +320,68 @@ public class PlayerMovement : MonoBehaviour
     private Vector3 GetSlopeMoveDirection()
     {
         return Vector3.ProjectOnPlane(moveDirection, slopeHit.normal).normalized;
+    }
+    
+    private void CheckForWalls()
+    {
+        wallRight = Physics.Raycast(transform.position, orientation.right, out rightWallHit, wallCheckDistance, wallMask);
+        wallLeft = Physics.Raycast(transform.position, -orientation.right, out leftWallHit, wallCheckDistance, wallMask);
+    }
+    
+    private void CheckForLedge()
+    {
+        Vector3 ledgeCheckPos = transform.position + Vector3.up * (playerHeight * 0.4f);
+        onLedge = Physics.Raycast(ledgeCheckPos, orientation.forward, out ledgeHit, ledgeCheckDistance, wallMask);
+        
+        if (onLedge && rb.linearVelocity.y < 0 && !grounded)
+        {
+            isClimbing = true;
+        }
+        else if (grounded || rb.linearVelocity.y > 0)
+        {
+            isClimbing = false;
+        }
+    }
+    
+    private void WallRunningMovement()
+    {
+        rb.useGravity = false;
+        
+        Vector3 wallNormal = wallRight ? rightWallHit.normal : leftWallHit.normal;
+        Vector3 wallForward = Vector3.Cross(wallNormal, transform.up);
+        
+        if ((orientation.forward - wallForward).magnitude > (orientation.forward - -wallForward).magnitude)
+            wallForward = -wallForward;
+        
+        rb.AddForce(wallForward * wallRunForce, ForceMode.Force);
+        
+        if (!(wallLeft && moveInput.x > 0) && !(wallRight && moveInput.x < 0))
+            rb.AddForce(-wallNormal * 100, ForceMode.Force);
+        
+        rb.AddForce(transform.up * wallRunGravity, ForceMode.Force);
+    }
+    
+    private void WallJump()
+    {
+        exitingSlope = true;
+        wallRunning = false;
+        
+        Vector3 wallNormal = wallRight ? rightWallHit.normal : leftWallHit.normal;
+        
+        Vector3 forceToApply = transform.up * wallJumpUpForce + wallNormal * wallJumpSideForce;
+        
+        rb.linearVelocity = new Vector3(rb.linearVelocity.x, 0f, rb.linearVelocity.z);
+        rb.AddForce(forceToApply, ForceMode.Impulse);
+        
+        readyToJump = false;
+        Invoke(nameof(ResetJump), jumpCooldown);
+    }
+    
+    private void ClimbingMovement()
+    {
+        if (isClimbing && onLedge)
+        {
+            rb.linearVelocity = new Vector3(rb.linearVelocity.x, climbSpeed, rb.linearVelocity.z);
+        }
     }
 }

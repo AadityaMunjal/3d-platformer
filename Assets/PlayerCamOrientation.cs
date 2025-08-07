@@ -1,5 +1,4 @@
 using UnityEngine;
-using UnityEngine.InputSystem;
 
 public class PlayerCamOrientation : MonoBehaviour
 {
@@ -10,30 +9,26 @@ public class PlayerCamOrientation : MonoBehaviour
 
     float xRotation;
     float yRotation;
+    
     void Start()
     {
-        Cursor.lockState = CursorLockMode.Locked; // Lock the cursor to the center of the screen
-        Cursor.visible = false; // Hide the cursor
+        Cursor.lockState = CursorLockMode.Locked; 
+        Cursor.visible = false; 
     }
 
-    // Update is called once per frame
     void Update()
     {
-        // Get mouse input
-        float mouseX = Mouse.current.delta.x.ReadValue() * sensX * Time.deltaTime;
-        float mouseY = Mouse.current.delta.y.ReadValue() * sensY * Time.deltaTime;
+        // legacy input
+        float mouseX = Input.GetAxis("Mouse X") * sensX * Time.deltaTime;
+        float mouseY = Input.GetAxis("Mouse Y") * sensY * Time.deltaTime;
 
-
-        // Update rotations
         yRotation += mouseX;
         xRotation -= mouseY;
 
-        // Clamp vertical rotation
         xRotation = Mathf.Clamp(xRotation, -90f, 90f);
 
-        // Apply rotations to the player and orientation
         transform.localRotation = Quaternion.Euler(xRotation, yRotation, 0);
-        orientation.localRotation = Quaternion.Euler(0, yRotation, 0);
-
+        if (orientation != null)
+            orientation.localRotation = Quaternion.Euler(0, yRotation, 0);
     }
 }
